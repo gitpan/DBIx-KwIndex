@@ -133,5 +133,12 @@ if ($r[0]!=1 || $r[1]!=1 || $r[2]!=0) { print "not " }; print "ok 14\n";
 @r = map { $kw->match_count({words=>$_,boolean=>'OR'}) } 'from and', 'from and the', 'from or and the';
 if ($r[0]!=5 || $r[1]!=5 || $r[2]!=5) { print "not " }; print "ok 15\n";
 
-print (($kw->remove_index ? "ok":"not ok") . " 16\n");
+#000904, test empty list input to methods
+print (($kw->common_word(101) &&
+        $kw->add_document([]) &&
+        $kw->remove_document([]) &&
+        $kw->update_document([]) &&
+        $kw->remove_stop_word([]) ? "ok":"not ok") . " 16\n");
+
+print (($kw->remove_index ? "ok":"not ok") . " 17\n");
 

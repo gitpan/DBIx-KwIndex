@@ -91,13 +91,14 @@ sub DESTROY {
 sub document_sub { croak "$ME: document_sub: this method must be overriden" }
 
 sub add_document {
-    my $self     = shift;
-    my $doc_ids  = shift or croak "$ME: add_document: \$kw->add_document([id,...])";
+	my $self     = shift;
+	my $doc_ids  = shift or croak "$ME: add_document: \$kw->add_document([id,...])";
 	croak "$ME: add_document: arg 1 must be an ARRAY ref" unless ref($doc_ids) eq 'ARRAY';
+	return 1 if !@$doc_ids;
 	
-    my %wordlist = (); # format: ( 'word1' => [ [doc_id,freq], ... ], ... )
-    my %doclist  = (); # format: ( doc_id => n, ... ); # n = number of words in document
-    
+	my %wordlist = (); # format: ( 'word1' => [ [doc_id,freq], ... ], ... )
+	my %doclist  = (); # format: ( doc_id => n, ... ); # n = number of words in document
+
     # retrieve documents
     ####################
     my $docs = $self->document_sub($doc_ids);
@@ -170,13 +171,15 @@ sub add_document {
     # 2
     # get the resulting word ids
     my %word_ids = ();
-    my $result = 
-    $dbh->selectall_arrayref(
-    "SELECT id,word FROM ${idx}_wordlist WHERE word IN (".
-      join(',',map {$dbh->quote($_)} keys %wordlist).")") or
-      do {$self->{'ERROR'}="Can't get data from wordlist: ".$dbh->errstr; $dbh->do('UNLOCK TABLES'); return undef};
+	if (keys %wordlist) {
+		my $result = 
+		$dbh->selectall_arrayref(
+		"SELECT id,word FROM ${idx}_wordlist WHERE word IN (".
+		join(',',map {$dbh->quote($_)} keys %wordlist).")") or
+		  do {$self->{'ERROR'}="Can't get data from wordlist: ".$dbh->errstr; $dbh->do('UNLOCK TABLES'); return undef};
 
-    for (@$result) { $word_ids{$_->[1]} = $_->[0] }
+		for (@$result) { $word_ids{$_->[1]} = $_->[0] }
+	}
 
     # 3
     # now add the vectors
@@ -198,6 +201,7 @@ sub remove_document {
     my $doc_ids = shift;
 
     croak "$ME: remove_document: arg 1 must be an ARRAY ref" unless ref($doc_ids) eq 'ARRAY';
+	return 1 if !@$doc_ids;
 
     my $dbh = $self->{'dbh'};
     my $idx = $self->{'index_name'};
@@ -228,22 +232,26 @@ sub common_word {
 	my $k = shift || 80;
 	my $dbh = $self->{'dbh'};
 	my $idx = $self->{'index_name'};
-	
+
 	local $dbh->{'RaiseError'} = 0 if $dbh->{'RaiseError'};
 
 	# first select the number of documents
 	my $num = $self->document_count;
 	defined($num) or do{$self->{'ERROR'}="Can't retrieve the number of documents: ".$dbh->errstr; return undef};
-	
+
 	# get the statistics from vectorlist
 	my $result1 = $dbh->selectall_arrayref("SELECT wid,COUNT(*)/$num as k FROM ${idx}_vectorlist GROUP BY wid HAVING k>=".($k/100));
 	defined($result1) or do{$self->{'ERROR'}="Can't retrieve common words: ".$dbh->errstr; return undef};
-	
+
 	# convert it to word by consulting the wordlist table
-	my $result2 = $dbh->selectall_arrayref("SELECT word FROM ${idx}_wordlist WHERE id IN (".join(',',map { $_->[0] } @$result1).")");
-	defined($result2) or do{$self->{'ERROR'}="Can't retrieve common words: ".$dbh->errstr; return undef};
-	
-	return [ map { $_->[0] } @$result2 ];
+	if (@$result1) {
+		my $result2 = $dbh->selectall_arrayref("SELECT word FROM ${idx}_wordlist WHERE id IN (".join(',',map { $_->[0] } @$result1).")");
+		defined($result2) or do{$self->{'ERROR'}="Can't retrieve common words: ".$dbh->errstr; return undef};
+
+		return [ map { $_->[0] } @$result2 ];
+	} else {
+		return [];
+	}
 }
 
 # find all words that are not contained in all documents (vectorlist)
@@ -305,6 +313,7 @@ sub remove_stop_word {
 	my $self = shift;
 	my $words = shift;
 	croak "$ME: remove_word: arg 1 must be an ARRAY ref" unless ref($words) eq 'ARRAY';
+	return 1 if !@$words;
 
 	my $dbh = $self->{'dbh'};
 	my $idx = $self->{'index_name'};

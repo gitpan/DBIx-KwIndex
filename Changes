@@ -1,5 +1,12 @@
 Revision history for Perl extension DBIx::KwIndex.
 
+0.03  Mon Sep  4 12:27:33 2000
+
+	- now checks so that add_document() doesn't fail when we index empty
+	  documents, common_word() doesn't fail if doesn't find any common
+	  words, and add_document(), remove_document(), update_document(),
+	  remove_stop_word() don't fail when given empty list.
+
 0.02  Sat Sep  2 06:46:07 2000
 	- add match_count() method
 	- small bug fixes
