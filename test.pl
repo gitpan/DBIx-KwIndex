@@ -127,5 +127,11 @@ $kw->empty_index;
 $kw->add_document([1..5]); 
 print (($kw->document_count == 5 && $kw->word_count == 168 ? "ok":"not ok") . " 13\n");
 
-print (($kw->remove_index ? "ok":"not ok") . " 14\n");
+@r = map { $kw->match_count({words=>$_,boolean=>'AND'}) } 'from and', 'from and the', 'from or and the';
+if ($r[0]!=1 || $r[1]!=1 || $r[2]!=0) { print "not " }; print "ok 14\n";
+
+@r = map { $kw->match_count({words=>$_,boolean=>'OR'}) } 'from and', 'from and the', 'from or and the';
+if ($r[0]!=5 || $r[1]!=5 || $r[2]!=5) { print "not " }; print "ok 15\n";
+
+print (($kw->remove_index ? "ok":"not ok") . " 16\n");
 

@@ -1,5 +1,9 @@
 Revision history for Perl extension DBIx::KwIndex.
 
+0.02  Sat Sep  2 06:46:07 2000
+	- add match_count() method
+	- small bug fixes
+
 0.01  Wed Apr 12 02:28:07 2000
 	- original version; created by h2xs 1.19
 

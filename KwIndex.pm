@@ -2,10 +2,13 @@ package DBIx::KwIndex;
 
 use strict;
 use Carp;
-use vars qw($VERSION $ME);
+use vars qw($VERSION $ME $debug);
 
-$VERSION = 0.01;
+$VERSION = 0.02;
 $ME      = 'DBIx::KwIndex';
+
+$debug = 0;
+sub _debug { return unless $debug; print "debug: ", @_, "\n"; }
 
 # CONSTRUCTOR
 #############
@@ -56,10 +59,10 @@ sub new {
 	my $w;
 	my $sth1 = $dbh->prepare("SELECT word FROM ${idx}_stoplist") or
 	  croak "$ME: new: Can't load stoplist: ".$dbh->errstr;
-	$sth1->execute or
+	$sth1->execute() or
 	  croak "$ME: new: Can't load stoplist: ".$dbh->errstr;
 	while (($w) = $sth1->fetchrow_array) { $stoplist->{$w}=1 }
-	$self->{'stoplist'} = $stoplist;	
+	$self->{'stoplist'} = $stoplist;
 	
     $self;
 }
@@ -320,52 +323,102 @@ sub is_stop_word {
 	exists shift->{'stoplist'}->{ lc($_[0]) }
 }
 
-sub search {
-    my $self = shift;
-    my $args = shift || {};
-        
-    croak "$ME: search: arg 1 must be a HASH ref" unless ref($args) eq 'HASH';
-    croak "$ME: search: option 'words' not defined" unless exists $args->{'words'};
-    croak "$ME: search: option 'words' must be a SCALAR" if ref($args->{'words'});
+sub _search_or_match_count {
+	my $is_count = shift;
+	my $self = shift;
+	my $args = shift || {};
 
-    my $dbh = $self->{'dbh'};
-    my $idx = $self->{'index_name'};
+	croak "$ME: search: arg 1 must be a HASH ref" unless ref($args) eq 'HASH';
+	croak "$ME: search: option 'words' not defined" unless exists $args->{'words'};
+
+	my $dbh = $self->{'dbh'};
+	my $idx = $self->{'index_name'};
 
 	local $dbh->{'RaiseError'} = 0 if $dbh->{'RaiseError'};
 	    
-    # split the words
-	my $words = _split_to_words($args->{'words'});
+	# split the words if we are offered a SCALAR (assume it's a phrase)
+	my $words;
+	if (ref($args->{'words'}) eq 'ARRAY') {
+		$words = $args->{'words'};
+	} else {
+		$words = _split_to_words($args->{'words'});
+	}
 
 	# delete duplicate words, convert them all to lowercase
-    $words = [  keys %{ { map { lc($_) => 1 } @$words } }  ];
-    return [] unless @$words;
+	$words = [  keys %{ { map { lc($_) => 1 } @$words } }  ];
+	return($is_count ? 0 : []) unless @$words;
 
     # first we retrieve the word ids
     my $op = $args->{'re'} ? 'REGEXP':'LIKE';
-       	
-    my $result0 = $dbh->selectall_arrayref("SELECT id FROM ${idx}_wordlist WHERE ".join(' OR ', map {"word $op ".$dbh->quote($_)} @$words)) or
-      do {$self->{'ERROR'}="Can't retrieve word ids: ".$dbh->errstr; return undef};
+	my $bool = exists($args->{'boolean'}) && defined($args->{'boolean'}) && uc($args->{'boolean'}) eq 'AND' ? 'AND':'OR';
 
-    my @word_ids = map { $_->[0] } @$result0;
-    return [] unless @word_ids;
-    
-    # and then we search the vectorlist
-	my $stmt = 
-	'SELECT did,count(wid) as c,avg(f) as a,count(wid)*count(wid)*count(wid)*avg(f) as ca '.
-    "FROM ${idx}_vectorlist WHERE wid IN (".join(',',@word_ids).") ".
-    " GROUP BY did ".
-    (defined($args->{'boolean'}) && uc($args->{'boolean'}) eq 'AND' && !$args->{'re'} ? 
-    "HAVING c >= ".scalar(@word_ids):'').
-    " ORDER BY ca DESC ".
-    (defined($args->{'num'}) ? "LIMIT " . (defined($args->{'start'}) ? 
-    (($args->{'start'} - 1).",".$args->{'num'}) : $args->{'num'})
-      :'');
+	my $result0 = $dbh->selectall_arrayref("SELECT id FROM ${idx}_wordlist WHERE ".join(' OR ', map {"word $op ".$dbh->quote($_)} @$words)) or
+	  do {$self->{'ERROR'}="Can't retrieve word ids: ".$dbh->errstr; return undef};
 
-	1;	
-    my $result = $dbh->selectall_arrayref($stmt) or 
-    do {$self->{'ERROR'}="Can't search vectorlist: ".$dbh->errstr; return undef};
-    return [ map { $_->[0] } @$result ];
+	my @word_ids = map { $_->[0] } @$result0;
+	if (!@word_ids or ($bool eq 'AND' && @word_ids < @$words)) {
+		return($is_count ? 0 : []);
+    }
+
+	# and then we search the vectorlist
+	my $can_optimize=0;
+	my $stmt;
+
+	if ($is_count) {
+
+		if ($bool eq 'AND' && !$args->{'re'}) {
+			$stmt = 'SELECT did,count(wid) as c '.
+			        "FROM ${idx}_vectorlist WHERE wid IN (".join(',',@word_ids).") ".
+			        "GROUP BY did ".
+			        "HAVING c >= ".scalar(@word_ids);
+		} else {
+			$can_optimize=1;
+			$stmt = "SELECT COUNT(DISTINCT did) ".
+			        "FROM ${idx}_vectorlist WHERE wid IN (".join(',',@word_ids).")";
+		}
+
+	} else {
+
+		$stmt = 'SELECT did,count(wid) as c,avg(f) as a,count(wid)*count(wid)*count(wid)*avg(f) as ca '.
+		        "FROM ${idx}_vectorlist WHERE wid IN (".join(',',@word_ids).") ".
+		        "GROUP BY did ".
+		        ($bool eq 'AND' && !$args->{'re'} ? 
+		        "HAVING c >= ".scalar(@word_ids):'').
+		        " ORDER BY ca DESC ".
+		        (defined($args->{'num'}) ? "LIMIT " . (defined($args->{'start'}) ? 
+		        (($args->{'start'} - 1).",".$args->{'num'}) : $args->{'num'})
+		        :'');
+
+	}
+
+	_debug "search SQL: ", $stmt;
+
+    my $result;
+	if ($is_count) {
+		if ($can_optimize) {
+			defined (($result) = $dbh->selectrow_array($stmt)) or
+			  do {$self->{'ERROR'}="Can't search vectorlist: ".$dbh->errstr; return undef};
+			return $result;
+		} else {
+			my $sth = $dbh->prepare($stmt);
+			my $count=0;
+			my @row;
+			$sth->execute() or 
+			  do {$self->{'ERROR'}="Can't search vectorlist: ".$sth->errstr; return undef};
+			++$count while(@row = $sth->fetchrow_array());
+			$sth->finish;
+			return $count;
+		}
+	} else {
+		$result = $dbh->selectall_arrayref($stmt) or 
+    	  do {$self->{'ERROR'}="Can't search vectorlist: ".$dbh->errstr; return undef};
+    	return [ map { $_->[0] } @$result ];
+	}
 }
+
+sub search { _search_or_match_count(0, @_) }
+
+sub match_count { _search_or_match_count(1, @_) }
 
 sub remove_index {
     my $self = shift;
@@ -541,7 +594,7 @@ DBIx::KwIndex - create and maintain keyword indices in DBI tables
  $docs = $kw->search({ words=>'upset stomach' });
  $docs = $kw->search({ words=>'upset stomach', boolean=>'AND' });
  $docs = $kw->search({ words=>'upset stomach', start=>11, num=>10 });
- $docs = $kw->search({ words=>'upset (bite|stomach)', re=>1 });
+ $docs = $kw->search({ words=>['upset','(bite|stomach)'], re=>1 });
 
  $kw->add_stop_word(['the','an','am','is','are']) or die $kw->{ERROR};
  $words = $kw->common_word(85);
@@ -549,6 +602,7 @@ DBIx::KwIndex - create and maintain keyword indices in DBI tables
 
  $ndocs  = $kw->document_count();
  $nwords = $kw->word_count();
+ $ndocs  = $kw->match_count({ words=>'upset stomach', boolean=>'OR' });
 
  $kw->remove_index or die $kw->{ERROR};
  $kw->empty_index  or die $kw->{ERROR};
@@ -598,7 +652,7 @@ Below is a sample of a document_sub() that retrieves document from the
     # requested. remember to return the documents exactly 
     # in the order requested!
     my %tmp = map { $_->[0] => $_->[1] } @$result;
-    return [ @tmp{ @$aref } ];
+    return [ @tmp{ @$ary_ref } ];
  }
 
 =item 3. Create the indexer object.
@@ -661,8 +715,26 @@ Some examples:
  die "can't search" if !defined($docs);
 
  # find documents which contains all the words.
- $docs = $kw->search({ words=>['upset stomach'], boolean=>'AND' });
+ $docs = $kw->search({ words=>'upset stomach', boolean=>'AND' });
  die "can't search" if !defined($docs);
+
+If you just want to know how many documents match your query, use the
+match_count() method. If you want to retrieve all the matches anyway, to
+know how many documents match just find out the size of the match array.
+That will save you from extra index access.
+
+ # find the number of documents that match the query
+ $ndocs = $kw->match_count({ words=>'halitosis' });
+
+ # find the number of matches and retrieve only the first twenty of them
+ $query = { words=>'halitosis', num=>20 };
+ $ndocs = $kw->match_count($query);
+ $docs  = $kw->search($query);
+
+ # search and get the matches. get the number of matches from the
+ # result set itself.
+ $docs  = $kw->match_count({ words=>'halitosis' });
+ $ndocs = @$docs;
 
 =item 6. Now suppose some documents change, and you need to update the
 index to reflect that. Just use the methods below.
@@ -723,14 +795,20 @@ Steven Haryanto &lt;steven@haryan.to&gt;
 
 =head1 COPYRIGHT
 
-Copyright (c) 1995-1999 Steven Haryanto. All rights reserved. 
+Copyright (c) 2000 Steven Haryanto. All rights reserved. 
 
 You may distribute under the terms of either the GNU General Public License
 or the Artistic License, as specified in the Perl README file.
 
 =head1 BUGS/CAVEATS/TODOS
 
-Test the module under other database server (besides MySQL).
+Enable the module to use other database server (besides MySQL).
+MySQL-specific SQL bits that need to be adjusted include, but not limited
+to: LIMIT clause, LOCK/UNLOCK TABLES statements, REPLACE INTO/INSERT IGNORE
+statements, COUNT(DISTINCT ...) group function, AUTO_INCREMENT and
+INT/UNSIGNED. (Don't you just hate SQL? C<:-)> Thanks to Edwin Pratomo for
+pointing these out). Currently I do not need this feature, since I only use
+MySQL for current projects. Any volunteer?
 
 Use a more correct search sorting (the current one is kinda bogus :).
 
@@ -744,19 +822,20 @@ $dbh->tables?
 
 =head1 NOTES
 
-At least two other Perl extensions exist for creating keyword indices and
-storing them in a database: DBIx::TextIndex and MyConText. As of this
-writing, only DBIx::TextIndex features phrase-searching and boolean NOT; and
-only DBIx::KwIndex offers feature to delete documents from index (but please
-see the updated version and documentation for details). I personally find
-DBIx::KwIndex more convenient when I need to index documents that change
-often, because one can add/remove some documents without rebuilding the
-entire index.
+At least three other Perl extensions exist for creating keyword indices and
+storing them in a database: DBIx::TextIndex, MyConText,
+DBIx::FullTextSearch. You might want to take a look at them before you
+decide which one better suits your need. Personally I develop DBIx::KwIndex
+because I want to have a module that: a) is simple and convenient to use; b)
+supports updating the index without rebuilding it from scratch.
+
+Incidentally, these three extensions and DBIx::KwIndex itself use MySQL
+specifically. One that could use Interbase or Postgres would perhaps be
+nice.
 
 Advices/comments/patches welcome.
 
 =head1 HISTORY
 
 0001xx=first draft,satunet.com. 000320=words->scalar.
-000412=0.01/documentation/cpan.
-
+000412=0.01/documentation/cpan. 000902=update doc/fixes(see Changes)
